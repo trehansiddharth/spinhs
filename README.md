@@ -1,2 +1,4 @@
-spinhs
+Spin.hs
 ======
+
+Spin.hs is a web framework based on security and more abstractable components. The idea is of being able to use multiple finite state machines concurrently and still having a degree of functional purity. More specifically, suppose we have several different state machines ("nodes") running in separate threads. These nodes can communicate with each other and with other nodes using data structures called "pipes". If these pipes have certain properties, it turns out that the output produced by the nodes is invariant of the order in which input is received -- that is, only what input is received determines how the nodes will respond, not in what order or at what time the inputs are received. These nodes and pipes can be used to build web servers that are more stable and more responsive to multiple clients accessing the same resource at once. This is very much a work in progress.

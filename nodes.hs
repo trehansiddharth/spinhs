@@ -1,18 +1,41 @@
-{-# LANGUAGE TypeFamilies, DatatypeContexts, GADTs #-}
+{-# LANGUAGE TypeFamilies, DatatypeContexts, GADTs, MultiParamTypeClasses, FlexibleInstances #-}
 
-module Nodes where
+module Spin.Nodes where
 	import Control.Concurrent
 	import Control.Monad
-	import Pipes
+	import Control.Monad.Trans
+	import System.IO.Unsafe
+	import Spin.Pipes
+	import Spin.SMT
 	
-	-- "Evaluation" component for the Node GADT
-	class Evaluation a
+	data Node pin pout s =	Pure s ((Pipe Pushable pout, Pipe Pullable pin) -> s -> SMT s IO ())
 	
-	data Deterministic
-	data NonDeterministic
+	--start :: Node pin pout s -> (pout, pin) -> SMT s IO ()
+	start (Pure s f) ps = lift $ loopNode (Pure s f) ps s >> return ()
 	
-	instance Evaluation Deterministic
-	instance Evaluation NonDeterministic
+	loopNode node ps state = do
+		result <- runNode node ps state
+		case result of
+			Transition newstate -> loopNode node ps newstate
+			Exit exitstate -> return ()
+			Proceed x -> fail "State machine must either exit or transition to a new state"
 	
-	-- "Node" data structure
-	data Monad m => Node a b s m = Node (Pipe Pullable a -> Pipe Pushable b -> s -> m ())
+	runNode (Pure s n) ps state = runSMT $ n ps state
+	
+	spawn node = do
+		(ppush, ppull) <- construct
+		lift . forkIO $ do
+			runSMT . start node $ (ppush, ppull)
+			return ()
+		return (invert ppush, invert ppull)
+	
+	-- sandbox
+	
+	{--data MyState = Starting | Running | Stopping | Ok
+	mynode (pout, pin) state = do
+		case state of
+			Starting -> transition Running
+			Running -> do
+				msg <- lift . pull $ pin
+				transition Stopping
+			Stopping -> exit Ok--}
