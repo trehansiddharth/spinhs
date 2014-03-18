@@ -8,10 +8,10 @@ module Spin.Nodes where
 	import Spin.Pipes
 	import Spin.SMT
 	
-	data Node pin pout s =	Pure s ((Pipe Pushable pout, Pipe Pullable pin) -> s -> SMT s IO ())
+	data Node pin pout s =	Node s ((Pipe Pushable pout, Pipe Pullable pin) -> s -> SMT s IO ())
 	
 	--start :: Node pin pout s -> (pout, pin) -> SMT s IO ()
-	start (Pure s f) ps = lift $ loopNode (Pure s f) ps s >> return ()
+	start ps (Node s f) = lift $ loopNode (Node s f) ps s >> return ()
 	
 	loopNode node ps state = do
 		result <- runNode node ps state
@@ -20,12 +20,18 @@ module Spin.Nodes where
 			Exit exitstate -> return ()
 			Proceed x -> fail "State machine must either exit or transition to a new state"
 	
-	runNode (Pure s n) ps state = runSMT $ n ps state
+	runNode (Node s n) ps state = runSMT $ n ps state
 	
 	spawn node = do
 		(ppush, ppull) <- construct
 		lift . forkIO $ do
-			runSMT . start node $ (ppush, ppull)
+			runSMT . start (ppush, ppull) $ node
+			return ()
+		return (invert ppush, invert ppull)
+	
+	spawnWith (ppush, ppull) node = do
+		lift . forkIO $ do
+			runSMT . start (ppush, ppull) $ node
 			return ()
 		return (invert ppush, invert ppull)
 	

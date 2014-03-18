@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeFamilies, DatatypeContexts, GADTs #-}
+{-# LANGUAGE TypeFamilies, DatatypeContexts, GADTs, FlexibleInstances #-}
 
 module Spin.Pipes where
 	import Control.Concurrent
@@ -27,26 +27,38 @@ module Spin.Pipes where
 		Pushable :: MVar a -> Pipe Pushable a
 		Pullable :: MVar a -> Pipe Pullable a
 	
-	-- "Pipes" Monad
-	{--data Monad m => PipesT m a = PipesT { runPipes :: m a }
+	-- "Pure" monad
 	
-	instance Monad PipesT where
-		return = PipesT . return
-		(>>=) u f = PipesT $ u >>= (runPipes . f)
+	{--data Pure m a = Pure { runPure :: m a }
 	
-	extract (Pipes x) = x--}
+	instance Monad m => Monad (Pure m) where
+		(>>=) u f = Pure $ do
+			x <- runPure u
+			runPure . f $ x
+		return = Pure . return--}
 	
-	pull :: Pipe Pullable a -> SMT s IO a
-	pull (Pullable m) = lift . takeMVar $ m
+	-- "Pipes" class
 	
-	push :: Pipe Pushable a -> a -> SMT s IO ()
-	push (Pushable m) = lift . putMVar m
+	class Monad m => Pipes m where
+		pull :: Pipe Pullable a -> m a
+		push :: Pipe Pushable a -> a -> m ()
+		construct :: m (Pipe Pushable a, Pipe Pullable b)
 	
-	construct :: SMT s IO (Pipe Pushable a, Pipe Pullable b)
-	construct = do
-		ma <- lift newEmptyMVar
-		mb <- lift newEmptyMVar
-		return (Pushable ma, Pullable mb)
+	instance Pipes (SMT s IO) where
+		pull (Pullable m) = lift . takeMVar $ m
+		push (Pushable m) = lift . putMVar m
+		construct = do
+			ma <- lift newEmptyMVar
+			mb <- lift newEmptyMVar
+			return (Pushable ma, Pullable mb)
+	
+	{--instance Pipes (SMT s (Pure IO)) where
+		pull (Pullable m) = lift . return . takeMVar $ m
+		push (Pushable m) = lift . return . putMVar m
+		construct = do
+			ma <- lift newEmptyMVar
+			mb <- lift newEmptyMVar
+			return (Pushable ma, Pullable mb)--}
 	
 	-- "Strict" data structure, similar to pipes but makes nodes non-deterministic
 	data Strict a = Strict (MVar (Maybe a))
@@ -69,6 +81,3 @@ module Spin.Pipes where
 	-- TODO: replace Strict with Pipe + Non-deterministic Node + Pipe?
 	check :: Strict a -> IO (Maybe a)
 	check (Strict m) = takeMVar m
-	
-	unstricten :: Strict a -> IO (Pipe Pullable a)
-	unstricten = undefined

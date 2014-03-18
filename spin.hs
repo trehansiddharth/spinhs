@@ -4,155 +4,88 @@ module Spin where
 	import Network
 	import Network.HTTP
 	import System.IO
-	--import Network.HTTP.Server
-	--import Network.HTTP.Server.Response
 	import Control.Concurrent
 	import Control.Monad
 	import Control.Monad.Trans.Class
 	import Control.Monad.Trans.State
+	import Spin.Pipes
+	import Spin.Nodes
+	import Spin.SMT
 	
-	data Pipe p => Node p = Node { action :: p -> IO NodeStatus }
-	data NodeStatus = OK | Quit | Error String deriving (Eq, Show)
+	data DataRequest = DataRequest | DataClose
+	data DataResponse a = DataResponse { getBody :: a }
 	
-	class Pipe p where
-		type Chunk p :: *
-		pull :: p -> IO (Chunk p)
-		push :: p -> Chunk p -> IO ()
+	data GenericNodeState a b = Starting a | Running b | Stopping b | Stopped Int
 	
-	data HttpOut = HttpOut { hmv :: MVar HttpChunk, hmvo :: MVar HttpChunk }
-	data HttpChunk = DataRequest | DataResponse { body :: String } deriving (Eq, Show)
-	data Url = Localhost | Url { url :: String }
+	connect :: String -> SMT s IO (Pipe Pullable (DataResponse String), Pipe Pushable DataRequest)
+	connect url = spawn $ Node (Starting url) httpNode
 	
-	instance Pipe HttpOut where
-		type Chunk HttpOut = HttpChunk
-		pull pipe = takeMVar . hmvo $ pipe
-		push pipe chunk = putMVar (hmv pipe) chunk
+	httpNode (pout, pin) state = case state of
+		Starting url -> do
+			transition (Running url)
+		Running url -> do
+			req <- pull pin
+			case req of
+				DataRequest -> do
+					rsp <- lift . simpleHTTP $ getRequest url
+					body <- lift $ getResponseBody rsp
+					push pout (DataResponse body)
+					transition (Running url)
+				DataClose -> do
+					exit (Stopped 0)
 	
-	connect site = do
-					m <- newEmptyMVar
-					n <- newEmptyMVar
-					forkIO $ httpThread site m n
-					return $ HttpOut m n
-	
-	data HttpIn = HttpIn { imv :: MVar HttpChunk, omv :: MVar HttpChunk }
-	data LocalPort = LocalPort { portof :: PortID }
-	
-	instance Pipe HttpIn where
-		type Chunk HttpIn = HttpChunk
-		pull pipe = takeMVar . omv $ pipe
-		push pipe chunk = putMVar (imv pipe) chunk
-	
+	bind :: PortNumber -> SMT s IO (Pipe Pullable (Pipe Pullable DataRequest, Pipe Pushable (DataResponse String)))
 	bind site = do
-				n <- newEmptyMVar
-				o <- newEmptyMVar
-				withSocketsDo $ do
-									sock <- listenOn . portof $ site
-									m <- newEmptyMVar
-									forkIO $ sockloop sock m
-									forkIO $ sockhandle sock m n o
-									return $ HttpIn n o
+		ps <- spawn $ Node (Starting ((PortNumber site), Nothing)) bindNode
+		return $ fst ps
 	
-	sockloop sock m = do
-						(h, _, _) <- accept sock
-						putMVar m h
-						sockloop sock m
+	bindNode (pout, pin) state = case state of
+		Starting (site, _) -> do
+			sock <- lift . listenOn $ site
+			transition (Running (site, Just sock))
+		Running (site, Just sock) -> do
+			(h, hostname, portnumber) <- lift . accept $ sock
+			ps <- spawn $ Node (Starting h) portHandlerNode
+			push pout ps
+			transition (Running (site, Just sock))
 	
-	sockhandle sock m n o = do
-							h <- takeMVar m
-							putMVar o DataRequest
-							chunk <- takeMVar n
-							hPutStr h . write_msg . body $ chunk
-							hFlush h
-							hClose h
-							sockhandle sock m n o
-	
-	data Pipe p => Strict p = Strict { inner :: p, sm :: MVar (Maybe (Chunk p)) }
-	
-	instance Pipe p => Pipe (Strict p) where
-		type Chunk (Strict p) = Maybe (Chunk p)
-		pull pipe = do
-					val <- takeMVar . sm $ pipe
-					putMVar (sm pipe) Nothing
-					return val
-		push pipe chunk = push (inner pipe) ((\(Just x) -> x) chunk)
-	
-	stricten pipe = do
-					m <- newEmptyMVar
-					pipe' <- pipe
-					putMVar m Nothing
-					forkIO $ strictloop pipe' m
-					return $ Strict pipe' m
-	
-	strictloop pipe m = do
-						val <- pull pipe
-						takeMVar m -- also handle queues
-						putMVar m (Just val)
-						strictloop pipe m
-	
-	{--data Pipe p => Meta p = Meta { mmi :: MVar p, mmo :: MVar p }
-	
-	instance Pipe p => Pipe (Meta p) where
-		type Chunk (Meta p) = p
-		pull pipe = takeMVar . mmo $ pipe
-		push pipe chunk = putMVar (mmi pipe) chunk--}
-	
-	data Shuttle a = Shuttle { mmi :: MVar a, mmo :: MVar a}
-	
-	instance Pipe (Shuttle a) where
-		type Chunk (Shuttle a) = a
-		pull pipe = takeMVar . mmo $ pipe
-		push pipe chunk = putMVar (mmi pipe) chunk
-	
-	spawn :: (Node (Shuttle a)) -> IO (Shuttle a)
-	spawn node = do
-		m <- newEmptyMVar
-		n <- newEmptyMVar
-		let shuttleA = Shuttle m n
-		let shuttleB = Shuttle n m
-		forkIO $ nhandle node shuttleA
-		return shuttleB
-	
-	nhandle :: Pipe p => Node p -> p -> IO ()
-	nhandle node pipe = do
-		result <- (action node) pipe
-		if (result == OK)
-			then do
-				nhandle node pipe
-			else do
-				return ()
-	
-	httpThread :: Url -> MVar HttpChunk -> MVar HttpChunk -> IO ()
-	httpThread url m n = do
-							req <- takeMVar m
-							if (req == DataRequest)
-								then do
-									rsp <- (case url of
-										Url address -> simpleHTTP (getRequest address)
-										Localhost -> simpleHTTP (getRequest "http://localhost"))
-									body <- getResponseBody rsp
-									putMVar n (DataResponse body)
-								else do
-									putMVar n (DataResponse "fail: Can only handle request")
-							httpThread url m n
+	portHandlerNode (pout, pin) state = case state of
+		Starting h -> do
+			push pout DataRequest
+			transition (Running h)
+		Running h -> do
+			resp <- pull pin
+			d <- lift . hGetLine $ h
+			lift . hPutStr h . write_msg . getBody $ resp
+			transition (Stopping h)
+		Stopping h -> do
+			lift . hFlush $ h
+			lift . hClose $ h
+			exit (Stopped 0)
 	
 	write_msg msg = bare_headers ++ "\r\nContent-Length: " ++ (show . length $ msg) ++ "\r\n\r\n" ++ msg ++ "\r\n"
 	
+	keep_alive_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: Keep-Alive"
 	bare_headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html"
 	medium_headers = "HTTP/1.1 200 OK\r\nServer: spin.hs/0.0.1 (Ubuntu)\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip"
 	full_headers = "HTTP/1.1 200 OK\r\nServer: spin.hs/0.0.1 (Ubuntu)\r\nDate: Sun, 02 Feb 2014 15:52:00 GMT\r\nContent-Type: text/html\r\nLast-Modified: Mon, 06 May 2013 10:26:49 GMT\r\nTransfer-Encoding: chunked\r\nContent-Encoding: gzip"
 	
 	-- sandbox
 	
-	-- main routine: every 5 seconds, checks if there are any requests at port 8000. If so, gets data from google.com and pushes it as a response.
-	main = do
-		pipeServer <- stricten . bind $ LocalPort . PortNumber $ 8000
-		pipeOut <- connect $ Url "http://www.google.com"
-		forever $ do
-			req <- pull pipeServer
-			if (req /= Nothing)
-				then do
-					push pipeOut DataRequest
-					res <- pull pipeOut
-					push pipeServer $ Just res
-				else do
-					threadDelay 5000000
+	main = runSMT $ do
+		ps <- construct
+		start ps (Node (Starting ()) nodeMain)
+		return ()
+	
+	-- when a request arrives at port 8000, pulls data from http://www.google.com and pushes it as the response
+	nodeMain (pin, pout) state = case state of
+		Starting _ -> do
+			p8000 <- bind 8000
+			(pgoogle_in, pgoogle_out) <- connect "http://www.google.com"
+			transition $ Running (p8000, pgoogle_in, pgoogle_out)
+		Running (p8000, pgoogle_in, pgoogle_out) -> do
+			(ppull, ppush) <- pull p8000
+			push pgoogle_out DataRequest
+			response <- pull pgoogle_in
+			push ppush $ response
+			transition (Running (p8000, pgoogle_in, pgoogle_out))
