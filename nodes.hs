@@ -34,14 +34,3 @@ module Spin.Nodes where
 			runSMT . start (ppush, ppull) $ node
 			return ()
 		return (invert ppush, invert ppull)
-	
-	-- sandbox
-	
-	{--data MyState = Starting | Running | Stopping | Ok
-	mynode (pout, pin) state = do
-		case state of
-			Starting -> transition Running
-			Running -> do
-				msg <- lift . pull $ pin
-				transition Stopping
-			Stopping -> exit Ok--}

@@ -11,26 +11,27 @@ module Spin where
 	import Spin.Pipes
 	import Spin.Nodes
 	import Spin.SMT
+	import Spin.Interfaces
 	
-	data DataRequest = DataRequest | DataClose
+	data DataRequest = DataRequest String | DataClose
 	data DataResponse a = DataResponse { getBody :: a }
 	
 	data GenericNodeState a b = Starting a | Running b | Stopping b | Stopped Int
 	
 	connect :: String -> SMT s IO (Pipe Pullable (DataResponse String), Pipe Pushable DataRequest)
-	connect url = spawn $ Node (Starting url) httpNode
+	connect host = spawn $ Node (Starting host) httpNode
 	
 	httpNode (pout, pin) state = case state of
-		Starting url -> do
-			transition (Running url)
-		Running url -> do
+		Starting host -> do
+			transition (Running host)
+		Running host -> do
 			req <- pull pin
 			case req of
-				DataRequest -> do
-					rsp <- lift . simpleHTTP $ getRequest url
+				DataRequest path -> do
+					rsp <- lift . simpleHTTP $ getRequest (host ++ path)
 					body <- lift $ getResponseBody rsp
 					push pout (DataResponse body)
-					transition (Running url)
+					transition (Running host)
 				DataClose -> do
 					exit (Stopped 0)
 	
@@ -51,11 +52,12 @@ module Spin where
 	
 	portHandlerNode (pout, pin) state = case state of
 		Starting h -> do
-			push pout DataRequest
+			d <- lift . hGetLine $ h
+			let url = takeWhile (/= ' ') . drop 4 $ d
+			push pout $ DataRequest url
 			transition (Running h)
 		Running h -> do
 			resp <- pull pin
-			d <- lift . hGetLine $ h
 			lift . hPutStr h . write_msg . getBody $ resp
 			transition (Stopping h)
 		Stopping h -> do
@@ -85,7 +87,13 @@ module Spin where
 			transition $ Running (p8000, pgoogle_in, pgoogle_out)
 		Running (p8000, pgoogle_in, pgoogle_out) -> do
 			(ppull, ppush) <- pull p8000
-			push pgoogle_out DataRequest
-			response <- pull pgoogle_in
-			push ppush $ response
+			DataRequest path <- pull ppull
+			case path of
+				"/localhost/index.html" -> do
+					response <- lift . readTemplate $ "main"
+					push ppush $ DataResponse response
+				_ -> do
+					push pgoogle_out $ DataRequest path
+					response <- pull pgoogle_in
+					push ppush $ response
 			transition (Running (p8000, pgoogle_in, pgoogle_out))
